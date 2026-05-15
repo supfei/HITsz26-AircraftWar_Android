@@ -24,9 +24,9 @@ public class DifficultySelectActivity extends AppCompatActivity {
         Button btnHard = findViewById(R.id.btn_hard);
         TextView tvSubtitle = findViewById(R.id.tv_subtitle);
         if (fromOnlineMode) {
-            tvSubtitle.setText("请选择联机难度");
+            tvSubtitle.setText("请选择⚔\uFE0F联机难度");
         } else {
-            tvSubtitle.setText("请选择单机难度");
+            tvSubtitle.setText("请选择\uD83D\uDD79\uFE0F单机难度");
         }
 
         btnEasy.setOnClickListener(new View.OnClickListener() {
