@@ -1,143 +1,182 @@
-## 0318：触摸功能和最基础功能实现。
-## 0320：实现了基本的结束界面和本地排行榜。
-##### 今日解决了崩溃问题：
-观察logcat发现在游戏启动的时候gameview同时启动了两个gamethread，导致了流速翻倍，两个线程都在执行updateGame（），而我一直在怀疑是初始化time的问题。也是同样的原因导致实机测试闪退崩溃。
-##### 原因是：
-在 Android 生命周期中，`MainActivity.onResume()` 触发了 `resumeGame()` 启动了一个线程，紧接着 `SurfaceView` 的 `surfaceCreated()` 又被回调，不加判断地又启动了一个线程。
-相关代码：
-```
-@Override  
-protected void onResume() {  
-    super.onResume();  
-    Log.d("MainActivity", "Activity恢复");  
-  
-    if (gameView != null) {  
-        gameView.resumeGame();  
-    }  
-}
-```
+# AircraftWarDemo
+
+《软件构造实践》课程项目 —— 将《软件构造》课程中的 **Java Swing 桌面版飞机大战** 迁移至 **Android 移动端**，在保留核心玩法与面向对象设计的前提下，完成界面重构、触控与音频适配、本地/云端排行榜及双人对战等扩展功能。
+
+---
+
+## 功能概览
+
+- **单机模式**：简单 / 普通 / 困难三种难度，触控拖动英雄机，道具、Boss 战、背景滚动
+- **本地排行榜**：Room（SQLite）持久化，支持查看与删除历史成绩
+- **全球排行榜**：游戏结束后上传分数，从服务端拉取 Top 100
+- **双人对战**：创建/加入 6 位房间号，轮询同步对手分数与血量，对战结束后展示胜负结果
+- **音频**：背景音乐（普通 / Boss）、射击/爆炸等短音效，支持开关并与生命周期联动
+
+> **说明**：仓库包含 Android 客户端源码、`.env.example` 环境模板及 `server/app_exmple.js` 服务端配置模板。课程演示用的云服务器并非 7×24 小时常驻，**克隆后需自行部署后端** 才能使用排行榜与联机功能；单机模式无需联网即可运行。
+
+---
+
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| 客户端 | Java 11、Android SDK 30+、SurfaceView、AppCompatActivity、Room、Retrofit + OkHttp + Gson |
+| 服务端 | Node.js、Express、mysql2、cors |
+| 数据库 | MySQL（`scores`、`match_rooms` 等表，启动时自动建表） |
+
+### 设计模式与架构要点
+
+- **平台无关逻辑复用**：`AbstractGame` / `GameController` 体系、敌机工厂、碰撞检测、英雄机单例等自 Swing 版迁移
+- **策略模式**：多种射击策略（直线、散射、环射等）
+- **观察者模式**：游戏状态通知
+- **对象池**：子弹对象池，缓解高频 GC 导致的卡顿
+- **绘制与输入分离**：`GameView`（SurfaceView + 固定时间步循环）+ `TouchController`
+
+---
+
+## 仓库结构
 
 ```
-/**  
- * 重新启动游戏（用于从暂停状态恢复）  
- */  
-public void resumeGame() {  
-    if (isCleanedUp) {  
-        Log.d("GameView", "GameView已清理，无法恢复");  
-        return;  
-    }  
-  
-    // 【修复点】：增加 isValid() 和线程存活状态的校验  
-    if (!isRunning && holder != null && holder.getSurface() != null && holder.getSurface().isValid()) {  
-        Log.d("GameView", "恢复游戏");  
-        if (gameThread == null || !gameThread.isAlive()) {  
-            isRunning = true;  
-            gameThread = new Thread(this, "GameThread");  
-            gameThread.start();  
-        }  
-    }  
-}
+AircraftWarDemo/
+├── app/                          # Android 客户端
+│   └── src/main/java/com/example/aircraftwardemo/
+│       ├── activity/             # 主菜单、难度选择、游戏、结算、排行榜、联机大厅等
+│       ├── controller/           # Easy / Normal / Hard 游戏控制器
+│       ├── view/                 # GameView（Surface 绘制与游戏线程）
+│       ├── model/                # 飞机、子弹、道具等实体
+│       ├── network/              # 分数上传、全球榜、联机会话管理
+│       ├── dao/                  # Room 本地成绩存储
+│       ├── manager/              # 图片、音频等资源管理
+│       ├── pool/                 # 对象池
+│       └── strategy/             # 射击策略
+├── server/
+│   └── app_exmple.js             # 服务端示例（Express + MySQL，默认 8080 端口）
+├── .env.example                  # 客户端 API 地址配置模板
+└── gradle/                       # Gradle 与依赖版本
 ```
 
-```
-@Override  
-public void surfaceCreated(SurfaceHolder holder) {  
-    Log.d("GameView", "Surface创建");  
-  
-    // 1. 初始化游戏控制器  
-    initGameController();  
-  
-    // 2. 设置英雄机位置  
-    HeroAircraft hero = HeroAircraft.getInstance();  
-    hero.reset();  
-  
-    // 设置监听器  
-    if (gameController != null) {  
-        gameController.setGameOverListener(this);  
-    }  
-  
-    // 设置英雄机的GameController引用  
-    if (gameController != null) {  
-        hero.setGame(gameController);  
-    }  
-  
-    // 3. 启动游戏线程（【修复点】：增加防重复启动的校验）  
-    if (gameThread == null || !gameThread.isAlive()) {  
-        isRunning = true;  
-        gameThread = new Thread(this, "GameThread");  
-        gameThread.start();  
-    }  
-}
+---
+
+## 快速开始
+
+### 环境要求
+
+- **Android 客户端**：Android Studio（推荐）、JDK 11、Android SDK（`minSdk 30`，`targetSdk 36`）
+- **服务端**（可选）：Node.js、MySQL 5.7+ / 8.x
+
+### 1. 配置客户端
+
+```bash
+cp .env.example .env
 ```
 
-##### 疑惑：什么情况下会触发activity的onResume：
-在Android中，`onResume()`和`onPause()`会在以下情况下触发：
+编辑 `.env`，填写可访问的服务器地址（**`SCORE_API_BASE_URL` 必须以 `/` 结尾**）：
 
-- **来电/去电**：电话打入或打出
-    
-- **通知栏**：下拉或收起通知栏
-    
-- **系统弹窗**：如电量低、权限请求等
-    
-- **分屏模式**：进入或退出分屏
-    
-- **画中画模式**：视频应用常用
-    
-- **最近任务视图**：打开最近应用列表
-    
-- **锁屏/解锁**：按下电源键锁屏，然后解锁
-    
-- **其他应用覆盖**：如分享菜单、文件选择器等
+```env
+PUBLIC_IP=192.168.1.100
+SCORE_API_PORT=8080
+# 或直接指定完整地址：
+# SCORE_API_BASE_URL=http://192.168.1.100:8080/
+```
 
-##### 接下来的改进方向：
-- 1.区分暂停和停止，现在只有游戏终止处理，并没有游戏暂停处理。
-- 2.更解耦：创建游戏模式管理工厂；有多余的精力考虑把draw逻辑从GameController移出。
-- 3.生命周期：游戏线程应该与Surface绑定，而不是与Activity绑定。
-    - Activity生命周期: onCreate → onStart → onResume → onPause → onStop → onDestroy
-    - Surface生命周期: surfaceCreated → surfaceChanged → surfaceDestroyed
- ## 0322：使用工厂模式管理不同难度的游戏生成
- ##### 小优化：注释所有了sout，给属性增加添加了上限，缓解渲染掉帧
- ##### 待解决大问题：游戏在中后期，每一秒钟都在创建和销毁成百上千个对象。系统内存扛不住这种消耗，触发了频繁的垃圾回收（GC）。GC 运行时会暂停所有线程（包括你的游戏渲染线程），这会造成肉眼可见的严重卡顿（内存抖动）。
- ##### 暂时的想法：使用对象池
- ## 0324：创建并使用子弹对象池
- #### 1.实现了对象池类，搞定了子弹对象池
-解决了渲染掉帧以及gc（垃圾回收）问题。
-只实现子弹对象池是因为之前给敌机生成加上限了，最主要原因是子弹数量太多频繁增删导致内存抖动。创建敌机对象池等可作为有余力时的优化空间。
-##### 问题回顾
-- 内存抖动：在短时间内频繁增删大量临时对象，导致内存占用波动。
-- GC（garbage collection）：内存不足时GC会启动，**扫描**内存中的对象引用树。为了确保扫描时对象不被移动，它会**挂起（暂停）** 所有正在运行的线程（包括渲染线程和逻辑线程）。
-- ANR（application not responding)：频繁GC导致系统弹出ANR应用程序无响应。
-##### 对象池
-- 原理：空间换时间，预先申请内存放对象，使用对象时从池子里借，用完属性重置归还。
-- 起作用的原因：不需要老new，内存占用稳定，不会频繁GC。
-#### 2.待实现
-- 貌似简单模式不能有boss
-- 给道具前进轨迹加散射和左右边界反弹
-- 音乐播放：还没讲
-- 排行榜的删改查（也许实现）
-- 服务器部署：还没讲
-- 对战功能（想法）：
-	- 登录账号/输入用户名（防重复）
-	- 输入房间号
-	- 在游戏界面上实时获取对方的分数并显示
-- 优化ui（也许）：全屏会挡住实机的状态栏，有点丑
-## 0325：改了多道具前进轨迹
-#### 新发现问题：PropBulletPlus里new了线程会导致线程竞争
+构建时 Gradle 会将上述配置注入 `BuildConfig.SCORE_API_BASE_URL`，供 Retrofit 使用。
 
-## 0403：增加了背景滚动和音乐音效
-### 1.增加了游戏的背景滚动
-- 滚动速度统一在*GameControll.java*中的参数*scrollSpeed*调节
-### 2.增加了背景音乐和音效
-- 音乐：主界面也添加了背景音乐，每次*开始游戏*或者*返回menu界面*时会重新播放bgm，boss音乐正常
-- bullet音效：注释掉了英雄机射出子弹的（软件构造也说不用加，很吵）
-- bullet_hit音效：注释掉了敌机子弹击到英雄机的音效，保留了英雄机子弹射击到敌机的音效
-- 音量有待调节，带耳机听声音很小，但是炸弹声音（bomb_explosion）超级大，不知道不带耳机怎么样
+用 Android Studio 打开项目根目录，连接真机或模拟器后运行 `app` 模块即可。真机调试联机/排行榜时，请确保手机与服务器网络互通。
 
-## 0414：修改使游戏高分掉帧的逻辑并加强线程安全
-- 修改了环射prop代码中new线程的问题。
-- 掉帧处理（还是子弹问题）：Boss 子弹数从 20 降到 14、英雄/敌机子弹列表加硬上限并超限丢弃最旧（同时回收到对象池）、对象池回收去掉 contains 的 O(n) 检查。
+### 2. 部署服务端
 
-## 0415：增加了删除排行榜功能
-- 排行榜左侧有垃圾桶
-- 由于容易误触，增加了在删除前弹出确认对话框的功能
-- 本来想实现右滑显示垃圾桶的，由于较难，舍弃
+进入 `server/` 目录，修改 `app_exmple.js` 顶部的 `DB_CONFIG`：
+
+```javascript
+const DB_CONFIG = {
+  host: "127.0.0.1",
+  port: 3306,
+  user: "your_user",
+  password: "your_password",
+  database: "aircraft_war",
+  charset: "utf8mb4",
+};
+```
+
+安装依赖并启动（仓库未附带 `package.json` 时可手动初始化）：
+
+```bash
+cd server
+npm init -y
+npm install express mysql2 cors
+node app_exmple.js
+```
+
+健康检查：浏览器或 `curl` 访问 `http://<服务器IP>:8080/`，应返回 JSON：
+
+```json
+{ "ok": true, "message": "AircraftWar server is running." }
+```
+
+**部署注意**：
+
+- 在云服务器安全组 / 防火墙中放行 TCP **8080**（或你实际使用的端口）
+- MySQL 需提前创建数据库，脚本启动时会自动建表
+- 调试环境使用 HTTP 时，客户端已在 `AndroidManifest.xml` 中设置 `android:usesCleartextTraffic="true"`；生产环境建议改用 HTTPS
+
+---
+
+## API 接口
+
+与客户端 Retrofit 路径一致，基址示例：`http://<host>:8080/`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/` | 健康检查 |
+| POST | `/api/score/submit` | 提交分数 |
+| GET | `/api/score/top100` | 全球排行榜 Top 100 |
+| GET | `/api/score/search` | 按条件查询分数 |
+| POST | `/api/match/room/create` | 创建对战房间 |
+| POST | `/api/match/room/join` | 加入房间 |
+| GET | `/api/match/room/status` | 轮询房间状态 |
+| POST | `/api/match/room/start` | 房主开始游戏 |
+| POST | `/api/match/score/sync` | 对局中同步分数/血量 |
+| POST | `/api/match/score/finish` | 结束对战 |
+| GET | `/api/match/result/status` | 获取对战结果 |
+| POST | `/api/match/room/cleanup` | 清理房间 |
+
+联机流程简述：大厅创建/加入房间 → 约 1.2s 轮询房间状态 → 房主开始后双方进入 `MainActivity` → 对局内约 400ms 同步分数 → 本地结束后调用 `finish` → `MatchResultActivity` 展示结果。
+
+---
+
+## 主要界面
+
+| Activity | 功能 |
+|----------|------|
+| `MainMenuActivity` | 启动页：单机、联机、排行榜入口 |
+| `DifficultySelectActivity` | 难度选择 |
+| `MainActivity` | 游戏主界面（全屏 SurfaceView） |
+| `GameOverActivity` | 结算、输入昵称、上传成绩 |
+| `GlobalRankingActivity` | 本地榜 + 全球榜（RecyclerView） |
+| `OnlineLobbyActivity` | 联机大厅：创建/加入房间 |
+| `MatchResultActivity` | 对战胜负结果 |
+
+---
+
+## 常见问题
+
+| 现象 | 处理 |
+|------|------|
+| 网络请求失败 | 检查 `.env` 中 API 地址、服务器端口与安全组；确认 `baseUrl` 以 `/` 结尾 |
+| 404 或路径重复 `/api/api/...` | 统一 Retrofit `baseUrl` 与 `@GET`/`@POST` 相对路径写法 |
+| 联机一方不进入游戏 | 确认访客已保存 `room_id`，轮询 `started` 字段；检查网络是否中断 |
+| JSON 字段映射为 null | 对齐客户端 DTO 与服务端 JSON 字段名，或使用 `@SerializedName` |
+
+---
+
+## 已知限制与后续改进
+
+- 对战同步采用 **HTTP 短轮询**，实时性与服务器负载有权衡空间，可改为 WebSocket / SSE
+- 服务端 **无鉴权**，演示环境可用；生产需增加 Token、频控或签名校验
+- 6 位数字房间号已通过数据库查重，理论上仍有冲突可能
+
+---
+
+## 许可证
+
+本项目为课程实践作业，仅供学习交流使用。排行榜与联机功能需自行部署后端后使用。
